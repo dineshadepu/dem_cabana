@@ -1,0 +1,8 @@
+add_executable(01_dem_two_particles_colliding 01_dem_two_particles_colliding.cpp)
+target_link_libraries(01_dem_two_particles_colliding LINK_PUBLIC Cabana::cabanacore Cabana::Cajita)
+
+add_executable(02_dem_two_particles_colliding_tangential_contact 02_dem_two_particles_colliding_tangential_contact.cpp)
+target_link_libraries(02_dem_two_particles_colliding_tangential_contact LINK_PUBLIC Cabana::cabanacore Cabana::Cajita)
+
+
+install(TARGETS 01_dem_two_particles_colliding 02_dem_two_particles_colliding_tangential_contact DESTINATION ${CMAKE_INSTALL_BINDIR})
