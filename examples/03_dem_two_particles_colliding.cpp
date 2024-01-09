@@ -163,6 +163,103 @@ void dem_stage_3(AoSoAType & aosoa, double dt, int * limits){
 }
 
 
+void update_tangential_contacts(AoSoAType & aosoa, double dt, int * limits){
+  auto aosoa_position = Cabana::slice<0>     ( aosoa,    "position");
+  auto aosoa_ids = Cabana::slice<1>          ( aosoa,    "ids");
+  auto aosoa_velocity = Cabana::slice<2>     ( aosoa,    "velocity");
+  auto aosoa_force = Cabana::slice<3>          ( aosoa,    "force");
+  auto aosoa_mass = Cabana::slice<4>        ( aosoa,    "mass");
+  auto aosoa_density = Cabana::slice<5>        ( aosoa,    "density");
+  auto aosoa_radius = Cabana::slice<6>     ( aosoa,    "radius");
+
+  auto half_dt = dt * 0.5;
+  auto update_tangential_contacts_lambda_func = KOKKOS_LAMBDA( const int i )
+    {
+      int count = 0;
+      int k = 0;
+      int idx_total_ctcs = aosoa_total_no_tng_contacts( i );
+      int last_idx_tmp = aosoa_total_no_tng_contacts( i ) - ;
+      int sidx = -1;
+      // loop over all the contacts of particle d_idx
+      while (count < idx_total_ctcs){
+	// The index of the particle with which
+	// d_idx in contact is
+	sidx = aosoa_tng_idx( i, k );
+	if (sidx == -1){
+	  break;
+	}
+	else {
+	  double pos_i[3] = {aosoa_position( i, 0 ),
+	    aosoa_position( i, 1 ),
+	    aosoa_position( i, 2 )};
+
+	  double pos_j[3] = {aosoa_position( j, 0 ),
+	    aosoa_position( j, 1 ),
+	    aosoa_position( j, 2 )};
+
+	  double pos_ij[3] = {aosoa_position( i, 0 ) - aosoa_position( j, 0 ),
+	    aosoa_position( i, 1 ) - aosoa_position( j, 1 ),
+	    aosoa_position( i, 2 ) - aosoa_position( j, 2 )};
+
+	  // squared distance
+	  double r2ij = pos_ij[0] * pos_ij[0] + pos_ij[1] * pos_ij[1] + pos_ij[2] * pos_ij[2];
+	  // distance between i and j
+	  double rij = sqrt(r2ij);
+	  // Find the overlap amount
+	  double overlap =  aosoa_radius( i ) + aosoa_radius( j ) - rij;
+
+	  if (overlap <= 0.) {
+	    // if the swap index is the current index then
+	    // simply make it to null contact.
+	    if (k == last_idx_tmp){
+	      aosoa_tng_idx( i, k ) = -1;
+	      aosoa_tng_ss_x( i, k ) = 0.;
+	      aosoa_tng_ss_y( i, k ) = 0.;
+	      aosoa_tng_ss_z( i, k ) = 0.;
+	    }
+	    else {
+	      // swap the current tracking index with the final
+	      // contact index
+	      aosoa_tng_idx( i, k ) = aosoa_tng_idx( i, last_idx_tmp );
+	      aosoa_tng_idx( i, last_idx_tmp ) = -1;
+
+	      // swap tangential x displacement
+	      aosoa_tng_ss_x( i, k ) = aosoa_tng_ss_x( i, last_idx_tmp );
+	      aosoa_tng_ss_x( i, last_idx_tmp ) = 0.;
+
+	      // swap tangential y displacement
+	      aosoa_tng_ss_y( i, k ) = aosoa_tng_ss_y( i, last_idx_tmp );
+	      aosoa_tng_ss_y( i, last_idx_tmp ) = 0.;
+
+	      // swap tangential z displacement
+	      aosoa_tng_ss_z( i, k ) = aosoa_tng_ss_z( i, last_idx_tmp );
+	      aosoa_tng_ss_z( i, last_idx_tmp ) = 0.;
+
+	      // decrease the last_idx_tmp, since we swapped it to
+	      // -1
+	      last_idx_tmp -= 1;
+	    }
+
+	    // decrement the total contacts of the particle
+	    aosoa_total_no_tng_contacts( i ) -= 1;
+	  }
+	  else
+	    {
+	      k = k + 1;
+	    }
+	}
+	else{
+	  k = k + 1;
+	}
+	count += 1;
+      }
+    };
+  Kokkos::RangePolicy<ExecutionSpace> policy( limits[0], limits[1] );
+  Kokkos::parallel_for( "CabanaSPH:Integrator:UpdateTngCnts", policy,
+			update_tangential_contacts_lambda_func );
+}
+
+
 void compute_force(AoSoAType &aosoa,
 		   ViewVectorType & kn,
 		   double dt,
@@ -206,27 +303,55 @@ void compute_force(AoSoAType &aosoa,
 	aosoa_position( i, 1 ) - aosoa_position( j, 1 ),
 	aosoa_position( i, 2 ) - aosoa_position( j, 2 )};
 
-      double vel_ij[3] = {aosoa_velocity( i, 0 ) - aosoa_velocity( j, 0 ),
-	aosoa_velocity( i, 1 ) - aosoa_velocity( j, 1 ),
-	aosoa_velocity( i, 2 ) - aosoa_velocity( j, 2 )};
+      // normal vector passing from j to i
+      double nij_x = pos_ij[0] / rij;
+      double nij_y = pos_ij[1] / rij;
+      double nij_z = pos_ij[2] / rij;
 
-      // wij and dwij
-      // double wij = 0.;
-      double dwij[3] = {0., 0., 0.};
+      double vel_i = {0., 0., 0.};
+
+      double vel_i[0] = aosoa_velocity( i, 0 ) +
+      (aosoa_omega( i, 1 ) * nij_z - aosoa_omega( i, 2 ) * nij_y) * a_i;
+
+      double vel_i[1] = aosoa_velocity( i, 1 ) +
+      (aosoa_omega( i, 2 ) * nij_x - aosoa_omega( i, 0 ) * nij_z) * a_i;
+
+      double vel_i[2] = aosoa_velocity( i, 2 ) +
+      (aosoa_omega( i, 0 ) * nij_y - aosoa_omega( i, 1 ) * nij_x) * a_i;
+
+      double vel_j = {0., 0., 0.};
+
+      double vel_j[0] = aosoa_velocity( j, 0 ) +
+      (-aosoa_omega( j, 1 ) * nij_z + aosoa_omega( j, 2 ) * nij_y) * a_j;
+
+      double vel_j[1] = aosoa_velocity( i, 1 ) +
+      (-aosoa_omega( j, 2 ) * nij_x + aosoa_omega( j, 0 ) * nij_z) * a_j;
+
+      double vel_j[2] = aosoa_velocity( i, 2 ) +
+      (-aosoa_omega( j, 0 ) * nij_y + aosoa_omega( j, 1 ) * nij_x) * a_j;
+
+
+      // Now the relative velocity of particle i w.r.t j at the contact
+      // point is
+      double vel_ij[3] = {vel_i[0] - vel_j[0],
+	vel_i[1] - vel_j[1],
+	vel_i[2] - vel_j[2]};
+
+      // normal velocity magnitude
+      double vij_dot_nij = vel_ij[0] * nij_x + vel_ij[1] * nij_y + vel_ij[2] * nij_z;
+      double vn_x = vij_dot_nij * nij_x;
+      double vn_y = vij_dot_nij * nij_y;
+      double vn_z = vij_dot_nij * nij_z;
+
+      // tangential velocity
+      double vt_x = vel_ij[0] - vn_x;
+      double vt_y = vel_ij[1] - vn_y;
+      double vt_z = vel_ij[2] - vn_z;
 
       // squared distance
       double r2ij = pos_ij[0] * pos_ij[0] + pos_ij[1] * pos_ij[1] + pos_ij[2] * pos_ij[2];
       // distance between i and j
       double rij = sqrt(r2ij);
-      // // compute the kernel wij
-      // // compute_quintic_wij(rij, h_i, &wij);
-      // // compute the gradient of kernel dwij
-      // // compute_quintic_gradient_wij(pos_ij, rij, h_i, dwij);
-
-      // normal vector passing from j to i
-      double nij_x = pos_ij[0] / rij;
-      double nij_y = pos_ij[1] / rij;
-      double nij_z = pos_ij[2] / rij;
       /*
 	====================================
 	End: common to all equations in SPH.
@@ -253,14 +378,143 @@ void compute_force(AoSoAType &aosoa,
 	// # Eq 4 [1]
 	double kn = 4. / 3. * E_eff * sqrt(R_eff);
 
-	double tmp =  kn * overlap;
-	double frc_x = tmp * nij_x;
-	double frc_y = tmp * nij_y;
-	double frc_z = tmp * nij_z;
+	// normal force
+	double fn =  kn * pow(overlap, 1.5);
+	double fn_x = tmp * nij_x;
+	double fn_y = tmp * nij_y;
+	double fn_z = tmp * nij_z;
 
+	/****************************
+	 // tangential force computation
+	 *****************************/
+	// if the particle is not been tracked then assign an index in
+	// tracking history.
+	int tot_ctcs = aosoa_total_no_tng_contacts( i );
+
+	// # check if the particle is in the tracking list
+	// # if so, then save the location at found_at
+	// 	found = 0
+	// 	  for j in range(p, q1):
+	// 	if s_idx == d_tng_idx[j]:
+	// 	if s_dem_id[s_idx] == d_tng_idx_dem_id[j]:
+	// 	found_at = j
+	// 		     found = 1
+	// 		     break
+
+	int found = 0;
+	int found_at = -1;
+	for(int k=0; k<tot_ctcs; k++)
+	  {
+	    if (j == aosoa_tng_idx( i, k )) {
+	      found_at = k;
+	      found = 1;
+	      break;
+	    }
+	  }
+
+	double ft_x = 0.;
+	double ft_y = 0.;
+	double ft_z = 0.;
+
+	if (found == 0) {
+	  found_at = tot_ctcs;
+	  aosoa_tng_idx( i, found_at ) = j;
+	  aosoa_total_no_tng_contacts( i ) += 1;
+
+	  aosoa_tng_ss_x( i, found_at ) = 0.;
+	  aosoa_tng_ss_y( i, found_at ) = 0.;
+	  aosoa_tng_ss_z( i, found_at ) = 0.;
+	}
+
+	// We are tracking the particle history at found_at
+	// tangential velocity
+	double vij_magn = sqrt(vel_ij[0] * vel_ij[0] + vel_ij[1] * vel_ij[1] +
+			       vel_ij[2] * vel_ij[2]);
+
+	if (vij_magn < 1e-12) {
+	  aosoa_tng_ss_x( i, found_at ) = 0.;
+	  aosoa_tng_ss_y( i, found_at ) = 0.;
+	  aosoa_tng_ss_z( i, found_at ) = 0.;
+	}
+	else {
+	  // magnitude of the tangential velocity
+	  double ti_magn = sqrt(vt_x * vt_x + vt_y * vt_y + vt_z * vt_z);
+
+	  double ti_x = 0.;
+	  double ti_y = 0.;
+	  double ti_z = 0.;
+
+	  if (ti_magn < 1e-12) {
+	    ti_x = vt_x / ti_magn;
+	    ti_y = vt_y / ti_magn;
+	    ti_z = vt_z / ti_magn;
+	  }
+
+	  double delta_lt_x_star = d_tng_ss_x[found_at] + vij_x * dt;
+	  double delta_lt_y_star = d_tng_ss_y[found_at] + vij_y * dt;
+	  double delta_lt_z_star = d_tng_ss_z[found_at] + vij_z * dt;
+
+	  double delta_lt_dot_ti = (delta_lt_x_star * ti_x +
+				    delta_lt_y_star * ti_y +
+				    delta_lt_z_star * ti_z);
+	  aosoa_tng_ss_x( i, found_at ) = delta_lt_dot_ti * ti_x;
+	  aosoa_tng_ss_y( i, found_at ) = delta_lt_dot_ti * ti_y;
+	  aosoa_tng_ss_z( i, found_at ) = delta_lt_dot_ti * ti_z;
+
+	  // Compute the tangential stiffness
+	  double tmp_1 = (2. - aosoa_nu( i )) / aosoa_G( i );
+	  double tmp_2 = (2. - aosoa_nu( j )) / aosoa_G( j );
+	  double G_eff = 1. / (tmp_1 + tmp_2);
+	  // Eq 12 [1]
+	  double kt = 8. * G_eff * sqrt(R_eff * overlap);
+	  double S_t = kt;
+	  double eta_t = -2. * sqrt(5./6) * beta * sqrt(S_t * m_eff);
+
+	  double ft_x_star = -kt * aosoa_tng_ss_x( i, found_at ) - eta_t * vt_x;
+	  double ft_y_star = -kt * aosoa_tng_ss_y( i, found_at ) - eta_t * vt_y;
+	  double ft_z_star = -kt * aosoa_tng_ss_z( i, found_at ) - eta_t * vt_z;
+
+	  double ft_magn = sqrt(ft_x_star*ft_x_star + ft_y_star*ft_y_star + ft_z_star*ft_z_star);
+
+	  ti_x = 0.;
+	  ti_y = 0.;
+	  ti_z = 0.;
+
+	  if (ft_magn > 1e-12) {
+	    ti_x = ft_x_star / ft_magn;
+	    ti_y = ft_y_star / ft_magn;
+	    ti_z = ft_z_star / ft_magn;
+	  }
+
+	  double fn_magn = sqrt(fn_x*fn_x + fn_y*fn_y + fn_z*fn_z);
+
+	  double ft_magn_star = min(fric_coeff * fn_magn, ft_magn);
+
+	  // compute the tangential force, by equation 17 (Lethe)
+	  ft_x = ft_magn_star * ti_x;
+	  ft_y = ft_magn_star * ti_y;
+	  ft_z = ft_magn_star * ti_z;
+
+	  // Add damping to the limited force
+	  ft_x += eta_t * vt_x;
+	  ft_y += eta_t * vt_y;
+	  ft_z += eta_t * vt_z;
+
+	  // reset the spring length
+	  aosoa_tng_ss_x( i, found_at ) = -ft_x / kt;
+	  aosoa_tng_ss_y( i, found_at ) = -ft_y / kt;
+	  aosoa_tng_ss_z( i, found_at ) = -ft_z / kt;
+	}
+
+	// Add force to the particle i due to contact with particle j
 	aosoa_force( i, 0 ) += frc_x;
 	aosoa_force( i, 1 ) += frc_y;
 	aosoa_force( i, 2 ) += frc_z;
+
+	// Add torque to the particle i due to contact with particle j
+	aosoa_torque( i, 0 ) += (nij_y * ft_z - nij_z * ft_y) * a_i;
+	aosoa_torque( i, 1 ) += (nij_z * ft_x - nij_x * ft_z) * a_i;
+	aosoa_torque( i, 2 ) += (nij_x * ft_y - nij_y * ft_x) * a_i;
       }
 
     };
