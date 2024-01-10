@@ -15,7 +15,7 @@
 
 #include <iostream>
 
-#define DIM 2
+#define DIM 3
 
 
 /*
@@ -142,11 +142,11 @@ void dem_stage_3(AoSoAType & aosoa, double dt, int * limits){
 }
 
 
-void compute_force(AoSoAType &aosoa,
-		   ViewVectorType & kn,
-		   double dt,
-		   ListType * verlet_list,
-		   int * limits){
+void SSHertzContactForce(AoSoAType &aosoa,
+			 ViewVectorType & kn,
+			 double dt,
+			 ListType * verlet_list,
+			 int * limits){
   auto aosoa_position = Cabana::slice<0>     ( aosoa,    "position");
   auto aosoa_ids = Cabana::slice<1>          ( aosoa,    "ids");
   auto aosoa_velocity = Cabana::slice<2>     ( aosoa,    "velocity");
@@ -317,7 +317,15 @@ void run()
     ================================================
   */
   // Material properties of the particles
-  auto rho = 1000.;
+  auto radius = 0.01;
+  auto rho = 2800.;
+  double E = 4.8 * 1e10;
+  double nu = 0.2;
+  double G = E / (2. * (1. - nu));
+
+  auto spacing_dem = radius;
+  double velocity = 10.;
+
   ViewVectorType kn( "kn", 1 );
   ViewVectorType gravity( "gravity", 3 );
   // Create host mirrors of device views.
@@ -328,9 +336,6 @@ void run()
   h_gravity[0] = 0.;
   h_gravity[1] = 0.;
   h_gravity[2] = 0.;
-  double E = 1e7;
-  double nu = 0.33;
-  double G = 1e5;
 
   // Deep copy host views to device views.
   Kokkos::deep_copy( kn, h_kn );
@@ -339,14 +344,15 @@ void run()
   // Numerical parameters of the SPH scheme for fluid
 
   // integration related variables
-  double dt = 1e-4;
-  auto final_time = 10.;
+  double dt = 1e-7;
+  auto final_time = 1.3 * 1e-4;
   auto time = 0.;
   int steps = final_time / dt;
   // int steps = 100;
   // int steps = 1;
   // int print_freq = 1;
-  int print_freq = 100;
+  int print_freq = 10;
+  // set the pfreq based on the no of output files
   /*
     ================================================
     End: Step 1
@@ -361,20 +367,20 @@ void run()
   */
 
   // 1a. Create the particles for fluid
-  double spacing_dem = 0.1;
-  std::vector<double> x_host_sand = {0., 1., 2., 3.};
-  std::vector<double> y_host_sand = {0., 0., 0., 0.};
-  std::vector<double> z_host_sand = {0., 0., 0., 0.};
-  std::vector<double> u_host_sand = {2., 2., -2., -2.};
-  std::vector<double> v_host_sand = {0., 0., 0., 0.};
-  std::vector<double> w_host_sand = {0., 0., 0., 0.};
+  double spacing = 0.1;
+  std::vector<double> x_host_sand = {0., 2. * spacing_dem + 0.0001};
+  std::vector<double> y_host_sand = {0., 0.};
+  std::vector<double> z_host_sand = {0., 0.};
+  std::vector<double> u_host_sand = {velocity, -velocity};
+  std::vector<double> v_host_sand = {0., 0.};
+  std::vector<double> w_host_sand = {0., 0.};
 
   int no_dem_particles = x_host_sand.size();
 
   // 1b. Create the particles for boundary
-  std::vector<double> x_host_boundary = {-1., 4.};
-  std::vector<double> y_host_boundary = {0., 0.};
-  std::vector<double> z_host_boundary = {0., 0.};
+  std::vector<double> x_host_boundary = {};
+  std::vector<double> y_host_boundary = {};
+  std::vector<double> z_host_boundary = {};
 
   int no_bdry_particles = x_host_boundary.size();
 
@@ -433,7 +439,7 @@ void run()
       aosoa_host_mass ( i ) = rho * pow(spacing_dem, DIM);
       aosoa_host_density ( i ) = rho;
 
-      aosoa_host_radius( i ) = 0.4;
+      aosoa_host_radius( i ) = radius;
 
       aosoa_host_E( i ) = E;
       aosoa_host_nu( i ) = nu;
@@ -448,32 +454,32 @@ void run()
       aosoa_host_torque ( i, 2 ) = 0.;
     }
 
-  // Second assign Boundary particles data to the aosoa host
-  for ( std::size_t i = no_dem_particles; i < total_no_particles; ++i )
-    {
-      aosoa_host_position ( i, 0 ) = x_host_boundary [ i - no_dem_particles ];
-      aosoa_host_position ( i, 1 ) = y_host_boundary [ i - no_dem_particles ];
-      aosoa_host_position ( i, 2 ) = z_host_boundary [ i - no_dem_particles ];
+  // // Second assign Boundary particles data to the aosoa host
+  // for ( std::size_t i = no_dem_particles; i < total_no_particles; ++i )
+  //   {
+  //     aosoa_host_position ( i, 0 ) = x_host_boundary [ i - no_dem_particles ];
+  //     aosoa_host_position ( i, 1 ) = y_host_boundary [ i - no_dem_particles ];
+  //     aosoa_host_position ( i, 2 ) = z_host_boundary [ i - no_dem_particles ];
 
-      aosoa_host_ids ( i ) = i;
+  //     aosoa_host_ids ( i ) = i;
 
-      aosoa_host_velocity ( i, 0 ) = 0.;
-      aosoa_host_velocity ( i, 1 ) = 0.;
-      aosoa_host_velocity ( i, 2 ) = 0.;
+  //     aosoa_host_velocity ( i, 0 ) = 0.;
+  //     aosoa_host_velocity ( i, 1 ) = 0.;
+  //     aosoa_host_velocity ( i, 2 ) = 0.;
 
-      aosoa_host_force ( i, 0 ) = 0.;
-      aosoa_host_force ( i, 1 ) = 0.;
-      aosoa_host_force ( i, 2 ) = 0.;
+  //     aosoa_host_force ( i, 0 ) = 0.;
+  //     aosoa_host_force ( i, 1 ) = 0.;
+  //     aosoa_host_force ( i, 2 ) = 0.;
 
-      aosoa_host_mass ( i ) = rho * pow(spacing_dem, DIM);
-      aosoa_host_density ( i ) = rho;
+  //     aosoa_host_mass ( i ) = rho * pow(spacing_dem, DIM);
+  //     aosoa_host_density ( i ) = rho;
 
-      aosoa_host_radius( i ) = 0.4;
+  //     aosoa_host_radius( i ) = 0.4;
 
-      aosoa_host_E( i ) = E;
-      aosoa_host_nu( i ) = nu;
-      aosoa_host_G( i ) = G;
-    }
+  //     aosoa_host_E( i ) = E;
+  //     aosoa_host_nu( i ) = nu;
+  //     aosoa_host_G( i ) = G;
+  //   }
   // aosoa_host_velocity ( 0, 0 ) = 1.;
   // aosoa_host_velocity ( 1, 0 ) = -1.;
   // copy it back to aosoa
@@ -495,8 +501,8 @@ void run()
   // ================================================
   // ================================================
   double neighborhood_radius = 8. * spacing_dem;
-  double grid_min[3] = { -2.0, -neighborhood_radius, -neighborhood_radius };
-  double grid_max[3] = { 5., neighborhood_radius, neighborhood_radius };
+  double grid_min[3] = { -neighborhood_radius, -neighborhood_radius, -neighborhood_radius };
+  double grid_max[3] = { 2. * neighborhood_radius, 2. * neighborhood_radius, neighborhood_radius};
   double cell_ratio = 1.0;
 
   // Main timestep loop
@@ -518,9 +524,9 @@ void run()
                             cell_ratio, grid_min, grid_max );
 
       // compute the forces using positions at t+dt and velocity at t+dt/2.
-      compute_force(aosoa, kn, dt,
-		    &verlet_list,
-		    dem_limits);
+      SSHertzContactForce(aosoa, kn, dt,
+			  &verlet_list,
+			  dem_limits);
       dem_stage_3(aosoa, dt, dem_limits);
 
       // output
